@@ -246,7 +246,7 @@ struct QuotaBar: View {
                 } else if let t = window.usedText { Text(t).font(.caption).foregroundStyle(.secondary) }
             }
             if let f = window.usedFraction {
-                ProgressView(value: min(max(f, 0), 1)).tint(color(f))
+                MeterBar(fraction: f, color: color(f))
             }
             HStack {
                 if let t = window.usedText, window.usedFraction != nil { Text(t) }
@@ -319,5 +319,24 @@ extension Editor {
         let found = DataStore.shared.detectedEditors
         let list = allCases.filter { found.contains($0) }
         return list.isEmpty ? allCases : list
+    }
+}
+
+/// Thin rounded progress bar that keeps its color when the window is inactive
+/// (a tinted ProgressView turns grey in background windows).
+struct MeterBar: View {
+    let fraction: Double
+    let color: Color
+    var height: CGFloat = 6
+    var body: some View {
+        GeometryReader { g in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.secondary.opacity(0.18))
+                Capsule().fill(color.gradient).frame(width: max(height, g.size.width * min(max(fraction, 0), 1)))
+            }
+        }
+        .frame(height: height)
+        .accessibilityElement()
+        .accessibilityValue(Text(Fmt.percent(fraction)))
     }
 }

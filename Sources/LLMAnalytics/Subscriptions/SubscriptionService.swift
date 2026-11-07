@@ -65,7 +65,17 @@ final class SubscriptionService {
            let p = try? JSONDecoder().decode([ManualPlan].self, from: d) { manualPlans = p }
     }
 
+    private var demo = false
+
+    /// Screenshot mode: fixed providers and plans, nothing saved to preferences.
+    func loadDemo(providers: [ProviderUsage], manual: [ManualPlan]) {
+        demo = true
+        self.providers = providers
+        manualPlans = manual
+    }
+
     private func saveManual() {
+        guard !demo else { return }
         if let d = try? JSONEncoder().encode(manualPlans) { UserDefaults.standard.set(d, forKey: "manualPlans") }
     }
 

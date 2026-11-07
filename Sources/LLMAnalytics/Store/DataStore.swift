@@ -181,7 +181,16 @@ final class DataStore {
         }
     }
 
+    /// Screenshot mode: show synthetic sessions instead of reading anything from disk.
+    func loadDemo(_ demo: [SessionSummary]) {
+        sessions = demo.sorted { $0.end > $1.end }
+        detectedEditors = Set(demo.map(\.editor))
+        lastUpdated = Date()
+        recompute()
+    }
+
     func transcript(for s: SessionSummary) async -> [TranscriptMessage] {
+        if s.sourcePath == "demo" { return DemoData.transcript(for: s) }
         guard let src = Sources.source(for: s.editor) else { return [] }
         return await Task.detached(priority: .userInitiated) { src.transcript(for: s) }.value
     }

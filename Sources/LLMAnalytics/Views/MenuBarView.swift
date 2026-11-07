@@ -39,7 +39,7 @@ struct MenuBarView: View {
                 let tint: Color = b.fraction >= 1 ? .red : b.fraction >= 0.8 ? .orange : .green
                 HStack(spacing: 8) {
                     Text(b.period.title).font(.caption).frame(width: 52, alignment: .leading)
-                    ProgressView(value: min(b.fraction, 1)).tint(tint).controlSize(.small)
+                    MeterBar(fraction: b.fraction, color: tint, height: 5)
                     Text("\(Fmt.cost(b.spent)) / \(Fmt.cost(b.limit))").font(.caption2.monospacedDigit())
                         .foregroundStyle(b.fraction >= 0.8 ? tint : .secondary).frame(width: 96, alignment: .trailing)
                 }

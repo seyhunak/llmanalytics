@@ -171,7 +171,7 @@ final class AlertCenter {
     }
 
     private func deliver(_ alerts: [PendingAlert]) {
-        guard !alerts.isEmpty else { return }
+        guard !alerts.isEmpty, !DemoData.enabled else { return }
         var sent = UserDefaults.standard.dictionary(forKey: sentKey) as? [String: Double] ?? [:]
         let now = Date().timeIntervalSince1970
         sent = sent.filter { now - $0.value < 45 * 86_400 }   // forget alerts older than 45 days

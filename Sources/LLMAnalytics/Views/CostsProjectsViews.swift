@@ -133,8 +133,17 @@ struct ProjectsView: View {
                     }
                 }.width(min: 140, ideal: 200)
                 TableColumn("Editors") { (p: ProjectStat) in
-                    HStack(spacing: 3) { ForEach(p.editors.keys.sorted { $0.rawValue < $1.rawValue }) { EditorBadge(editor: $0, compact: true) } }
-                }.width(min: 60, ideal: 90)
+                    // Busiest editors first; the rest collapse into "+N" so the column never overflows.
+                    let eds = p.editors.sorted { $0.value > $1.value }.map(\.key)
+                    HStack(spacing: 3) {
+                        ForEach(eds.prefix(3)) { EditorBadge(editor: $0, compact: true) }
+                        if eds.count > 3 {
+                            Text("+\(eds.count - 3)").font(.caption2.weight(.medium)).foregroundStyle(.secondary)
+                                .help(eds.dropFirst(3).map(\.displayName).joined(separator: ", "))
+                        }
+                    }
+                    .clipped()
+                }.width(min: 90, ideal: 110)
                 TableColumn("Sessions", value: \.sessions) { Text("\($0.sessions)").monospacedDigit() }.width(60)
                 TableColumn("Messages", value: \.messages) { Text("\($0.messages)").monospacedDigit() }.width(70)
                 TableColumn("Tokens", value: \.tokenTotal) { Text(Fmt.tokens($0.tokens.total)).monospacedDigit() }.width(64)
