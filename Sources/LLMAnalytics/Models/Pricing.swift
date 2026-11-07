@@ -8,6 +8,13 @@ struct ModelPrice: Codable, Hashable, Sendable {
     var output: Double
     var cacheRead: Double
     var cacheWrite: Double
+    /// 1-hour cache write price; defaults to 2x input (Anthropic's rate).
+    var cacheWrite1h: Double? = nil
+    /// Long-context tier: above this many prompt tokens per request, input-side prices scale
+    /// by `longInput / input` and output uses `longOutput`.
+    var longThreshold: Int? = nil
+    var longInput: Double? = nil
+    var longOutput: Double? = nil
 }
 
 enum Pricing {
@@ -26,12 +33,14 @@ enum Pricing {
         ("claude-sonnet-5", .init(input: 2, output: 10, cacheRead: 0.20, cacheWrite: 2.5)),
         ("claude-sonnet-4", .init(input: 3, output: 15, cacheRead: 0.30, cacheWrite: 3.75)),
         ("claude-3-7-sonnet", .init(input: 3, output: 15, cacheRead: 0.30, cacheWrite: 3.75)),
-        ("claude-haiku-5", .init(input: 0.10, output: 0.50, cacheRead: 0.01, cacheWrite: 0.125)),
+        ("claude-haiku-5", .init(input: 0.10, output: 0.50, cacheRead: 0.01, cacheWrite: 0.125,
+                                 longThreshold: 100_000, longInput: 0.50, longOutput: 2.50)),
         ("claude-haiku-4", .init(input: 1, output: 5, cacheRead: 0.10, cacheWrite: 1.25)),
         ("claude-3-5-haiku", .init(input: 0.8, output: 4, cacheRead: 0.08, cacheWrite: 1)),
         ("opus", .init(input: 4, output: 20, cacheRead: 0.20, cacheWrite: 5)),
         ("sonnet", .init(input: 2, output: 10, cacheRead: 0.20, cacheWrite: 2.5)),
-        ("haiku", .init(input: 0.10, output: 0.50, cacheRead: 0.01, cacheWrite: 0.125)),
+        ("haiku", .init(input: 0.10, output: 0.50, cacheRead: 0.01, cacheWrite: 0.125,
+                        longThreshold: 100_000, longInput: 0.50, longOutput: 2.50)),
         // OpenAI (approximate list prices; edit pricing.json to correct)
         ("gpt-5-mini", .init(input: 0.25, output: 2, cacheRead: 0.025, cacheWrite: 0)),
         ("gpt-5-nano", .init(input: 0.05, output: 0.4, cacheRead: 0.005, cacheWrite: 0)),
@@ -82,13 +91,22 @@ enum Pricing {
         return m
     }
 
+    /// Cost of one request. Callers pass per-request usage so long-context tiers apply correctly.
     static func cost(model: String, tokens: TokenUsage) -> Double {
         guard let p = price(for: model) else { return 0 }
+        var inScale = 1.0
+        var outPrice = p.output
+        if let threshold = p.longThreshold, tokens.allInput > threshold {
+            if let li = p.longInput, p.input > 0 { inScale = li / p.input }
+            if let lo = p.longOutput { outPrice = lo }
+        }
         let m = 1_000_000.0
-        return Double(tokens.input) / m * p.input
-            + Double(tokens.output) / m * p.output
-            + Double(tokens.cacheRead) / m * p.cacheRead
-            + Double(tokens.cacheWrite) / m * p.cacheWrite
+        let w1h = p.cacheWrite1h ?? p.input * 2
+        return (Double(tokens.input) * p.input
+            + Double(tokens.cacheRead) * p.cacheRead
+            + Double(tokens.cacheWrite) * p.cacheWrite
+            + Double(tokens.cacheWrite1h) * w1h) / m * inScale
+            + Double(tokens.output) / m * outPrice
     }
 }
 

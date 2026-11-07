@@ -17,20 +17,28 @@ struct CodexSource: UsageSource {
         roots.flatMap { FS.find($0) { $0.hasSuffix(".jsonl") } }
     }
 
-    func parse(_ file: SourceFile) -> [SessionSummary] {
+    func parse(_ file: SourceFile) -> [SessionSummary] { parse(file, previous: nil).sessions }
+
+    func parse(_ file: SourceFile, previous: ParseState?) -> (sessions: [SessionSummary], state: ParseState?) {
+        IncrementalJSONL.parse(file, previous: previous, as: Accumulator.self)
+    }
+
+    struct Accumulator: LineAccumulator {
         var id: String?
         var cwd = ""
         var model = "gpt-5"
         var firstPrompt: String?
         var start: Date?, end: Date?
-        var userCount = 0, itemUserCount = 0
+        var userTimes: [Date] = []       // from event_msg user_message (older format)
+        var itemUserTimes: [Date] = []   // from item_completed UserMessage (newer format)
         var assistant = 0, respAssistant = 0
         var tools: [String: Int] = [:]
         var events: [UsageEvent] = []
-        var userTimes: [Date] = []
         var lastTotal = -1
 
-        FS.eachJSONLine(file.path) { obj in
+        static func prefilter(_ line: Data) -> Bool { true }
+
+        mutating func consume(_ obj: [String: Any]) {
             let ts = Dates.parse(obj["timestamp"])
             if let ts { start = min(start ?? ts, ts); end = max(end ?? ts, ts) }
             let payload = obj.obj("payload") ?? [:]
@@ -45,15 +53,14 @@ struct CodexSource: UsageSource {
                 switch payload.str("type") {
                 case "user_message":
                     if let m = payload.str("message"), !Str.looksInjected(m) {
-                        userCount += 1; if let ts { userTimes.append(ts) }
+                        userTimes.append(ts ?? Date())
                         if firstPrompt == nil { firstPrompt = m }
                     }
                 case "item_completed":
                     if let item = payload.obj("item"), item.str("type") == "UserMessage" {
                         let text = (item.arr("content") as? [[String: Any]] ?? []).compactMap { $0.str("text") }.joined(separator: "\n")
                         if !Str.looksInjected(text) {
-                            itemUserCount += 1
-                            if userCount == 0, let ts { userTimes.append(ts) }
+                            itemUserTimes.append(ts ?? Date())
                             if firstPrompt == nil { firstPrompt = text }
                         }
                     }
@@ -68,7 +75,7 @@ struct CodexSource: UsageSource {
                     let t = TokenUsage(input: max(0, input - cached), output: last.int("output_tokens"),
                                        cacheRead: cached, cacheWrite: last.int("cache_write_input_tokens"),
                                        reasoning: last.int("reasoning_output_tokens"))
-                    if !t.isZero { events.append(UsageEvent(timestamp: ts ?? file.mtime, model: model, tokens: t, reportedCost: nil)) }
+                    if !t.isZero { events.append(UsageEvent(timestamp: ts ?? Date(), model: model, tokens: t, reportedCost: nil)) }
                 default: break
                 }
             case "response_item":
@@ -86,14 +93,16 @@ struct CodexSource: UsageSource {
             default: break
             }
         }
-        if assistant == 0 { assistant = respAssistant }
-        let users = max(userCount, itemUserCount)
-        guard let s = start, let e = end, users + events.count > 0 else { return [] }
-        return [SessionSummary(
-            nativeID: id ?? (file.path as NSString).lastPathComponent, editor: editor, sourcePath: file.path,
-            title: Str.clean(firstPrompt ?? "", max: 90), project: cwd, start: s, end: e,
-            userMessages: users, assistantMessages: assistant, tools: tools, events: events,
-            userTimes: userTimes, fallbackModel: model)]
+
+        func build(file: SourceFile) -> [SessionSummary] {
+            let times = userTimes.count >= itemUserTimes.count ? userTimes : itemUserTimes
+            guard let s = start, let e = end, times.count + events.count > 0 else { return [] }
+            return [SessionSummary(
+                nativeID: id ?? (file.path as NSString).lastPathComponent, editor: .codex, sourcePath: file.path,
+                title: Str.clean(firstPrompt ?? "", max: 90), project: cwd, start: s, end: e,
+                userMessages: times.count, assistantMessages: assistant > 0 ? assistant : respAssistant,
+                tools: tools, events: events, userTimes: times, fallbackModel: model)]
+        }
     }
 
     func transcript(for session: SessionSummary) -> [TranscriptMessage] {

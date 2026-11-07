@@ -18,28 +18,43 @@ final class DataStore {
 
     var filter = Filter() { didSet { if filter != oldValue { recompute() } } }
 
-    private var cache: [String: (editor: Editor, file: SourceFile, sessions: [SessionSummary])] = [:]
+    private var cache: [String: CacheEntry] = [:]
     private var watcher: FileWatcher?
     private var pendingEditors: Set<Editor> = []
     private var debounce: Task<Void, Never>?
     private var tick: Timer?
     private var computeGeneration = 0
+    private var reloading = false
+    private var queued: (editors: Set<Editor>, force: Bool)?
+    private var saveTask: Task<Void, Never>?
+
+    struct CacheEntry: Sendable {
+        let editor: Editor
+        let file: SourceFile
+        let sessions: [SessionSummary]
+        let state: ParseState?
+    }
 
     private init() {}
 
     func start() {
         guard watcher == nil else { return }
-        Task { await reload(editors: Set(Editor.allCases)) }
+        Task {
+            // Show the last known numbers instantly, then catch up with what changed on disk.
+            let saved = await Task.detached(priority: .userInitiated) { DiskCache.load() }.value
+            if cache.isEmpty, !saved.isEmpty {
+                cache = saved
+                publish()
+            }
+            await reload(editors: Set(Editor.allCases))
+        }
         let roots = Sources.all.flatMap { s in s.watchRoots.map { ($0, s.editor) } }
         watcher = FileWatcher(paths: roots.map(\.0)) { [weak self] changed in
             Task { @MainActor in self?.filesChanged(changed, roots: roots) }
         }
-        // Fallback poll + keeps "active now" and today's numbers rolling over at midnight.
+        // Fallback poll; also rolls "today" and "active now" over without file changes.
         tick = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                guard let self else { return }
-                await self.reload(editors: Set(Editor.allCases))
-            }
+            Task { @MainActor in await self?.reload(editors: Set(Editor.allCases)) }
         }
     }
 
@@ -50,7 +65,7 @@ final class DataStore {
         guard !pendingEditors.isEmpty else { return }
         debounce?.cancel()
         debounce = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(800))
+            try? await Task.sleep(for: .milliseconds(500))
             guard !Task.isCancelled, let self else { return }
             let eds = self.pendingEditors; self.pendingEditors = []
             self.lastChangeAt = Date()
@@ -58,51 +73,93 @@ final class DataStore {
         }
     }
 
-    func refresh() async { await reload(editors: Set(Editor.allCases), force: true) }
+    /// Manual refresh: re-parses everything from scratch (drops incremental state).
+    func refresh() async {
+        ProjectResolver.resetCache()
+        await reload(editors: Set(Editor.allCases), force: true)
+    }
 
-    /// Re-stat every file for the given editors and re-parse only those whose mtime/size changed.
+    /// Re-stat every file for the given editors and parse only what changed — appended JSONL is
+    /// read from the previous offset, databases from their last update timestamp.
+    /// Overlapping calls are coalesced so two parses of the same file never race.
     func reload(editors: Set<Editor>, force: Bool = false) async {
+        if reloading {
+            let q = queued
+            queued = ((q?.editors ?? []).union(editors), (q?.force ?? false) || force)
+            return
+        }
+        reloading = true
         isLoading = true
         let snapshot = cache
         let sources = Sources.all.filter { editors.contains($0.editor) }
-        let result = await Task.detached(priority: .utility) { () -> [String: (Editor, SourceFile, [SessionSummary])] in
-            var out: [String: (Editor, SourceFile, [SessionSummary])] = [:]
-            await withTaskGroup(of: (Editor, [(String, SourceFile, [SessionSummary])]).self) { group in
+        let result = await Task.detached(priority: .utility) { () -> [String: CacheEntry] in
+            await withTaskGroup(of: [CacheEntry].self) { group in
                 for src in sources {
                     group.addTask {
-                        let files = src.discover()
-                        var rows: [(String, SourceFile, [SessionSummary])] = []
-                        let changed = files.filter { f in force || snapshot[f.path]?.file != f }
-                        let unchanged = files.filter { f in !force && snapshot[f.path]?.file == f }
-                        for f in unchanged { rows.append((f.path, f, snapshot[f.path]!.sessions)) }
-                        // Parse changed files concurrently in small chunks.
-                        let parsed = await withTaskGroup(of: (SourceFile, [SessionSummary]).self) { g in
-                            for f in changed { g.addTask { (f, src.parse(f)) } }
-                            var acc: [(SourceFile, [SessionSummary])] = []
-                            for await r in g { acc.append(r) }
-                            return acc
+                        await withTaskGroup(of: CacheEntry.self) { files in
+                            for f in src.discover() {
+                                let prev = snapshot[f.path]
+                                if !force, let prev, prev.file == f {
+                                    files.addTask { prev }
+                                    continue
+                                }
+                                files.addTask {
+                                    let (sessions, state) = Sources.parse(src, f, previous: force ? nil : prev?.state)
+                                    return CacheEntry(editor: src.editor, file: f, sessions: sessions, state: state)
+                                }
+                            }
+                            var out: [CacheEntry] = []
+                            for await e in files { out.append(e) }
+                            return out
                         }
-                        for (f, s) in parsed { rows.append((f.path, f, s)) }
-                        return (src.editor, rows)
                     }
                 }
-                for await (editor, rows) in group { for (p, f, s) in rows { out[p] = (editor, f, s) } }
+                var out: [String: CacheEntry] = [:]
+                for await entries in group { for e in entries { out[e.file.path] = e } }
+                return out
             }
-            return out
         }.value
 
         // Every discovered file for these editors is in `result`; anything else vanished.
-        let reloadedEditors = Set(sources.map(\.editor))
-        cache = cache.filter { !reloadedEditors.contains($0.value.editor) }
-        for (p, v) in result { cache[p] = (v.0, v.1, v.2) }
-
-        var dedup: [String: SessionSummary] = [:]
-        for entry in cache.values { for s in entry.sessions { dedup[s.id] = s } }
-        sessions = dedup.values.sorted { $0.end > $1.end }
-        detectedEditors = Set(sessions.map(\.editor))
+        let reloaded = Set(sources.map(\.editor))
+        let changed = force || result.contains { snapshot[$0.key]?.file != $0.value.file }
+            || snapshot.contains { reloaded.contains($0.value.editor) && result[$0.key] == nil }
+        cache = cache.filter { !reloaded.contains($0.value.editor) }
+        for (p, e) in result { cache[p] = e }
         lastUpdated = Date()
+        if changed || analytics.sessions.isEmpty { publish(); scheduleSave() } else { recomputeLiveOnly() }
         isLoading = false
+        reloading = false
+
+        if let q = queued {
+            queued = nil
+            await reload(editors: q.editors, force: q.force)
+        }
+    }
+
+    private func publish() {
+        sessions = Sources.merge(cache.values.flatMap(\.sessions)).sorted { $0.end > $1.end }
+        detectedEditors = Set(sessions.map(\.editor))
         recompute()
+    }
+
+    private func scheduleSave() {
+        saveTask?.cancel()
+        let entries = cache
+        saveTask = Task.detached(priority: .background) {
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled else { return }
+            DiskCache.save(entries)
+        }
+    }
+
+    /// Nothing on disk changed: only the time-based numbers ("today", "active now") can move.
+    private func recomputeLiveOnly() {
+        let all = sessions
+        Task.detached(priority: .utility) {
+            let l = LiveSnapshot.compute(all: all)
+            await MainActor.run { [weak self] in self?.live = l }
+        }
     }
 
     private func recompute() {

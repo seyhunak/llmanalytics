@@ -10,9 +10,21 @@ protocol UsageSource: Sendable {
     func discover() -> [SourceFile]
     /// Parse one file into zero or more sessions.
     func parse(_ file: SourceFile) -> [SessionSummary]
+    /// Incremental variant: `previous` is the state returned for this file last time.
+    /// Sources that can resume (append-only JSONL, databases with update timestamps) override it.
+    func parse(_ file: SourceFile, previous: ParseState?) -> (sessions: [SessionSummary], state: ParseState?)
     /// Full conversation for the transcript viewer (loaded on demand).
     func transcript(for session: SessionSummary) -> [TranscriptMessage]
 }
+
+extension UsageSource {
+    func parse(_ file: SourceFile, previous: ParseState?) -> (sessions: [SessionSummary], state: ParseState?) {
+        (parse(file), nil)
+    }
+}
+
+/// Opaque per-file parser state kept between reloads.
+protocol ParseState: Sendable {}
 
 enum Sources {
     static let all: [UsageSource] = [
@@ -20,6 +32,98 @@ enum Sources {
         CopilotVSCodeSource(), GeminiSource(), OpenCodeSource(),
     ]
     static func source(for editor: Editor) -> UsageSource? { all.first { $0.editor == editor } }
+
+    /// Parse + post-process (project folders resolved to their git root). Used by the store,
+    /// diagnostics and tests so they all see identical results.
+    static func parse(_ src: UsageSource, _ file: SourceFile, previous: ParseState?) -> (sessions: [SessionSummary], state: ParseState?) {
+        var (sessions, state) = src.parse(file, previous: previous)
+        for i in sessions.indices { sessions[i].project = ProjectResolver.root(for: sessions[i].project) }
+        return (sessions, state)
+    }
+
+    /// Sessions that share an id become one: subagent fragments are summed into their parent,
+    /// while duplicate copies of the same session are de-duplicated.
+    static func merge(_ sessions: [SessionSummary]) -> [SessionSummary] {
+        var byID: [String: SessionSummary] = [:]
+        for s in sessions {
+            guard let existing = byID[s.id] else { byID[s.id] = s; continue }
+            if existing.isPartial || s.isPartial {
+                byID[s.id] = .merged(existing, s)
+            } else if (s.end, s.messageCount) > (existing.end, existing.messageCount) {
+                // Same session stored twice (VS Code keeps .json and .jsonl copies): keep the newest.
+                byID[s.id] = s
+            }
+        }
+        return Array(byID.values)
+    }
+}
+
+// MARK: - Incremental JSONL
+
+/// Folds JSONL objects into session data. Value type so a saved state can be resumed safely.
+protocol LineAccumulator: Sendable {
+    init()
+    static func prefilter(_ line: Data) -> Bool
+    mutating func consume(_ obj: [String: Any])
+    func build(file: SourceFile) -> [SessionSummary]
+}
+
+struct JSONLState<A: LineAccumulator>: ParseState {
+    let offset: Int
+    let accumulator: A
+}
+
+enum IncrementalJSONL {
+    /// Resumes from the previous byte offset when the file only grew; otherwise starts over.
+    static func parse<A: LineAccumulator>(_ file: SourceFile, previous: ParseState?, as _: A.Type) -> (sessions: [SessionSummary], state: ParseState?) {
+        var acc = A()
+        var offset = 0
+        if let p = previous as? JSONLState<A>, Int64(p.offset) <= file.size {
+            acc = p.accumulator; offset = p.offset
+        }
+        let end = FS.eachJSONLine(file.path, from: offset, prefilter: A.prefilter) { acc.consume($0) }
+        return (acc.build(file: file), JSONLState(offset: end, accumulator: acc))
+    }
+}
+
+// MARK: - Projects
+
+enum ProjectResolver {
+    nonisolated(unsafe) private static var cache: [String: String] = [:]
+    private static let lock = NSLock()
+
+    /// Walks up to the enclosing git repository. Linked worktrees map to their main repo.
+    /// Paths outside any repo (or that no longer exist) are returned unchanged.
+    static func root(for path: String) -> String {
+        guard path.hasPrefix("/") else { return path }
+        lock.lock(); if let hit = cache[path] { lock.unlock(); return hit }; lock.unlock()
+        let resolved = resolve(path)
+        lock.lock(); cache[path] = resolved; lock.unlock()
+        return resolved
+    }
+
+    static func resetCache() { lock.lock(); cache = [:]; lock.unlock() }
+
+    private static func resolve(_ path: String) -> String {
+        let home = AppPaths.home.path
+        var dir = (path as NSString).standardizingPath
+        while dir != "/" && dir != home && !dir.isEmpty {
+            let git = (dir as NSString).appendingPathComponent(".git")
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: git, isDirectory: &isDir) {
+                if isDir.boolValue { return dir }
+                // Worktree / submodule: ".git" is a file containing "gitdir: <path>"
+                if let text = try? String(contentsOfFile: git, encoding: .utf8),
+                   let line = text.split(separator: "\n").first(where: { $0.hasPrefix("gitdir:") }) {
+                    let target = line.dropFirst("gitdir:".count).trimmingCharacters(in: .whitespaces)
+                    if let r = target.range(of: "/.git/worktrees/") { return String(target[..<r.lowerBound]) }
+                }
+                return dir
+            }
+            dir = (dir as NSString).deletingLastPathComponent
+        }
+        return path
+    }
 }
 
 // MARK: - File helpers
@@ -50,14 +154,20 @@ enum FS {
         return out
     }
 
-    /// Calls `body` with each JSON object line of a JSONL file. `prefilter` lets callers skip
-    /// lines cheaply (on raw bytes) before paying for JSON parsing.
-    static func eachJSONLine(_ path: String, prefilter: ((Data) -> Bool)? = nil, _ body: ([String: Any]) -> Void) {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path), options: .mappedIfSafe) else { return }
-        var start = data.startIndex
+    /// Calls `body` with each JSON object line of a JSONL file, starting at byte `offset`.
+    /// Only newline-terminated lines are consumed (a line still being written is left for next
+    /// time); returns the offset just past the last consumed line. `prefilter` lets callers skip
+    /// lines cheaply on raw bytes before paying for JSON parsing.
+    @discardableResult
+    static func eachJSONLine(_ path: String, from offset: Int = 0, prefilter: ((Data) -> Bool)? = nil,
+                             _ body: ([String: Any]) -> Void) -> Int {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path), options: .mappedIfSafe) else { return offset }
+        guard offset < data.count else { return min(offset, data.count) }
         let nl = UInt8(ascii: "\n")
+        var start = data.startIndex + offset
+        var consumedTo = offset
         while start < data.endIndex {
-            let end = data[start...].firstIndex(of: nl) ?? data.endIndex
+            guard let end = data[start...].firstIndex(of: nl) else { break }
             if end > start {
                 let line = data[start..<end]
                 if prefilter?(line) ?? true,
@@ -66,7 +176,9 @@ enum FS {
                 }
             }
             start = end + 1
+            consumedTo = start - data.startIndex
         }
+        return consumedTo
     }
 
     static func readJSON(_ path: String) -> Any? {

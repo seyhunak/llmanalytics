@@ -19,47 +19,76 @@ struct OpenCodeSource: UsageSource {
     var watchRoots: [String] { FS.exists(dbPath) ? [(dbPath as NSString).deletingLastPathComponent] : [] }
     func discover() -> [SourceFile] { statWithWAL(dbPath).map { [$0] } ?? [] }
 
-    func parse(_ file: SourceFile) -> [SessionSummary] {
-        guard let db = SQLiteDB(path: file.path), db.hasTable("session"), db.hasTable("message") else { return [] }
-        var sessions: [String: SessionSummary] = [:]
-        for r in db.rows("SELECT id, title, directory, model, time_created, time_updated FROM session WHERE time_archived IS NULL") {
+    func parse(_ file: SourceFile) -> [SessionSummary] { parse(file, previous: nil).sessions }
+
+    /// Rows are kept in the state and only rows with a newer `time_updated` are fetched, so a
+    /// new message costs one small query instead of re-reading the whole database.
+    struct State: ParseState {
+        struct Meta: Sendable { var title: String; var directory: String; var model: String?; var created: Date; var updated: Date }
+        struct Message: Sendable { var session: String; var role: String; var time: Date; var event: UsageEvent? }
+        var sessions: [String: Meta] = [:]
+        var messages: [String: Message] = [:]
+        var tools: [String: (session: String, tool: String)] = [:]
+        var sessionCursor = "0", messageCursor = "0", partCursor = "0"
+    }
+
+    func parse(_ file: SourceFile, previous: ParseState?) -> (sessions: [SessionSummary], state: ParseState?) {
+        guard let db = SQLiteDB(path: file.path), db.hasTable("session"), db.hasTable("message") else { return ([], nil) }
+        var st = (previous as? State) ?? State()
+        func date(_ v: String?) -> Date? { Dates.parse(NSNumber(value: Double(v ?? "0") ?? 0)) }
+
+        for r in db.rows("SELECT id, title, directory, model, time_created, time_updated, time_archived FROM session WHERE time_updated > ? ORDER BY time_updated", [st.sessionCursor]) {
             guard let id = r[0] else { continue }
-            let start = Dates.parse(NSNumber(value: Double(r[4] ?? "0") ?? 0)) ?? file.mtime
-            let end = Dates.parse(NSNumber(value: Double(r[5] ?? "0") ?? 0)) ?? start
-            sessions[id] = SessionSummary(nativeID: id, editor: editor, sourcePath: file.path,
-                                          title: r[1] ?? "", project: r[2] ?? "", start: start, end: end,
-                                          fallbackModel: r[3])
+            st.sessionCursor = r[5] ?? st.sessionCursor
+            if r[6] != nil { st.sessions[id] = nil; continue }
+            let created = date(r[4]) ?? file.mtime
+            st.sessions[id] = .init(title: r[1] ?? "", directory: r[2] ?? "", model: r[3], created: created, updated: date(r[5]) ?? created)
         }
-        for r in db.rows("SELECT session_id, time_created, data FROM message ORDER BY time_created") {
-            guard let sid = r[0], var s = sessions[sid], let d = parseJSONObject(r[2]) else { continue }
-            let ts = Dates.parse(NSNumber(value: Double(r[1] ?? "0") ?? 0)) ?? s.start
-            s.start = min(s.start, ts); s.end = max(s.end, ts)
-            if d.str("role") == "user" {
-                s.userMessages += 1; s.userTimes.append(ts)
-            } else if d.str("role") == "assistant" {
-                s.assistantMessages += 1
+        for r in db.rows("SELECT id, session_id, time_created, time_updated, data FROM message WHERE time_updated > ? ORDER BY time_updated", [st.messageCursor]) {
+            guard let id = r[0], let sid = r[1], let d = parseJSONObject(r[4]) else { continue }
+            st.messageCursor = r[3] ?? st.messageCursor
+            let ts = date(r[2]) ?? file.mtime
+            let role = d.str("role") ?? "assistant"
+            var event: UsageEvent?
+            if role == "assistant" {
                 let t = d.obj("tokens") ?? [:]
                 let tokens = TokenUsage(input: t.int("input"), output: t.int("output") + t.int("reasoning"),
                                         cacheRead: t.obj("cache")?.int("read") ?? 0,
                                         cacheWrite: t.obj("cache")?.int("write") ?? 0, reasoning: t.int("reasoning"))
                 let cost = d.dbl("cost") ?? 0
                 if !tokens.isZero || cost > 0 {
-                    s.events.append(UsageEvent(timestamp: ts, model: d.str("modelID") ?? s.fallbackModel ?? "unknown",
-                                               tokens: tokens, reportedCost: cost > 0 ? cost : nil))
+                    event = UsageEvent(timestamp: ts, model: d.str("modelID") ?? "unknown", tokens: tokens, reportedCost: cost > 0 ? cost : nil)
                 }
             }
-            sessions[sid] = s
+            st.messages[id] = .init(session: sid, role: role, time: ts, event: event)
         }
         if db.hasTable("part") {
-            for r in db.rows("SELECT session_id, json_extract(data,'$.tool') FROM part WHERE json_extract(data,'$.type')='tool'") {
-                guard let sid = r[0], let tool = r[1], sessions[sid] != nil else { continue }
-                sessions[sid]!.tools[tool, default: 0] += 1
+            for r in db.rows("SELECT id, session_id, time_updated, json_extract(data,'$.tool') FROM part WHERE time_updated > ? AND json_extract(data,'$.type')='tool' ORDER BY time_updated", [st.partCursor]) {
+                guard let id = r[0], let sid = r[1], let tool = r[3] else { continue }
+                st.partCursor = r[2] ?? st.partCursor
+                st.tools[id] = (sid, tool)
             }
         }
-        return sessions.values.compactMap { s in
+
+        var out: [String: SessionSummary] = [:]
+        for (id, m) in st.sessions {
+            out[id] = SessionSummary(nativeID: id, editor: editor, sourcePath: file.path, title: m.title,
+                                     project: m.directory, start: m.created, end: m.updated, fallbackModel: m.model)
+        }
+        for m in st.messages.values.sorted(by: { $0.time < $1.time }) {
+            guard out[m.session] != nil else { continue }
+            out[m.session]!.start = min(out[m.session]!.start, m.time)
+            out[m.session]!.end = max(out[m.session]!.end, m.time)
+            if m.role == "user" { out[m.session]!.userMessages += 1; out[m.session]!.userTimes.append(m.time) }
+            else { out[m.session]!.assistantMessages += 1 }
+            if let e = m.event { out[m.session]!.events.append(e) }
+        }
+        for t in st.tools.values where out[t.session] != nil { out[t.session]!.tools[t.tool, default: 0] += 1 }
+        let sessions: [SessionSummary] = out.values.compactMap { s in
             guard s.messageCount > 0 else { return nil }
             var s = s; s.finalize(); return s
         }
+        return (sessions, st)
     }
 
     func transcript(for session: SessionSummary) -> [TranscriptMessage] {

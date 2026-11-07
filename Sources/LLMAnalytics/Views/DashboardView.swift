@@ -121,7 +121,7 @@ struct DashboardView: View {
 
     private func tokenEconomy(_ a: Analytics) -> some View {
         let t = a.totalTokens
-        let parts: [(String, Int, Color)] = [("Cache read", t.cacheRead, .yellow), ("Cache write", t.cacheWrite, .orange),
+        let parts: [(String, Int, Color)] = [("Cache read", t.cacheRead, .yellow), ("Cache write", t.allCacheWrite, .orange),
                                              ("Input", t.input, .blue), ("Output", t.output, .green)]
         let total = max(t.total, 1)
         return VStack(alignment: .leading, spacing: 12) {

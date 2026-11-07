@@ -1,6 +1,7 @@
 import Foundation
 
-/// ~/.claude/projects/<encoded-cwd>/<session>.jsonl (plus subagent transcripts).
+/// ~/.claude/projects/<encoded-cwd>/<session>.jsonl, plus subagent runs in
+/// <session>/subagents/agent-*.jsonl which are folded into their parent session.
 /// Assistant messages are written once per content block with the same message id and
 /// repeated usage, so usage is de-duplicated by message id.
 struct ClaudeCodeSource: UsageSource {
@@ -20,9 +21,29 @@ struct ClaudeCodeSource: UsageSource {
         roots.flatMap { FS.find($0) { $0.hasSuffix(".jsonl") } }
     }
 
-    private static let interesting = ["\"assistant\"", "\"user\"", "custom-title", "\"summary\""]
+    func parse(_ file: SourceFile) -> [SessionSummary] { parse(file, previous: nil).sessions }
 
-    func parse(_ file: SourceFile) -> [SessionSummary] {
+    func parse(_ file: SourceFile, previous: ParseState?) -> (sessions: [SessionSummary], state: ParseState?) {
+        IncrementalJSONL.parse(file, previous: previous, as: Accumulator.self)
+    }
+
+    /// For ".../<session-id>/subagents/agent-x.jsonl" returns "<session-id>".
+    static func parentSessionID(of path: String) -> String? {
+        let parts = path.split(separator: "/")
+        guard let i = parts.lastIndex(of: "subagents"), i > 0 else { return nil }
+        return String(parts[i - 1])
+    }
+
+    static func tokens(_ u: [String: Any]) -> TokenUsage {
+        let totalWrite = u.int("cache_creation_input_tokens")
+        let w1h = min(totalWrite, u.obj("cache_creation")?.int("ephemeral_1h_input_tokens") ?? 0)
+        return TokenUsage(input: u.int("input_tokens"), output: u.int("output_tokens"),
+                          cacheRead: u.int("cache_read_input_tokens"), cacheWrite: totalWrite - w1h,
+                          reasoning: u.obj("output_tokens_details")?.int("thinking_tokens") ?? 0,
+                          cacheWrite1h: w1h)
+    }
+
+    struct Accumulator: LineAccumulator {
         var sessionID: String?
         var cwd = ""
         var title: String?
@@ -36,9 +57,10 @@ struct ClaudeCodeSource: UsageSource {
         var toolIDs = Set<String>()
         var userTimes: [Date] = []
 
-        FS.eachJSONLine(file.path, prefilter: { line in
-            Self.interesting.contains { line.containsASCII($0) }
-        }) { obj in
+        private static let interesting = ["\"assistant\"", "\"user\"", "custom-title", "\"summary\""].map { Data($0.utf8) }
+        static func prefilter(_ line: Data) -> Bool { interesting.contains { line.range(of: $0) != nil } }
+
+        mutating func consume(_ obj: [String: Any]) {
             let type = obj.str("type")
             if type == "custom-title", let t = obj.str("customTitle") { title = t; return }
             if type == "summary", let t = obj.str("summary"), title == nil { title = t; return }
@@ -51,7 +73,7 @@ struct ClaudeCodeSource: UsageSource {
 
             if type == "user" {
                 if obj["isMeta"] as? Bool == true { return }
-                if let text = Self.userText(msg["content"]), !Str.looksInjected(text) {
+                if let text = ClaudeCodeSource.userText(msg["content"]), !Str.looksInjected(text) {
                     userCount += 1
                     if let ts { userTimes.append(ts) }
                     if firstPrompt == nil { firstPrompt = text }
@@ -59,37 +81,45 @@ struct ClaudeCodeSource: UsageSource {
                 return
             }
 
-            // assistant
             let model = msg.str("model") ?? "unknown"
+            guard model != "<synthetic>" else { return }
             let mid = msg.str("id") ?? obj.str("uuid") ?? UUID().uuidString
-            if model != "<synthetic>" { assistantIDs.insert(mid) }
+            assistantIDs.insert(mid)
             for case let block as [String: Any] in msg.arr("content") ?? [] where block.str("type") == "tool_use" {
                 let id = block.str("id") ?? UUID().uuidString
                 if toolIDs.insert(id).inserted, let name = block.str("name") {
-                    tools[Self.toolLabel(name), default: 0] += 1
+                    tools[ClaudeCodeSource.toolLabel(name), default: 0] += 1
                 }
             }
-            if let u = msg.obj("usage"), model != "<synthetic>" {
-                let t = TokenUsage(input: u.int("input_tokens"), output: u.int("output_tokens"),
-                                   cacheRead: u.int("cache_read_input_tokens"),
-                                   cacheWrite: u.int("cache_creation_input_tokens"),
-                                   reasoning: u.obj("output_tokens_details")?.int("thinking_tokens") ?? 0)
+            if let u = msg.obj("usage") {
+                let t = ClaudeCodeSource.tokens(u)
                 if usageByMessage[mid] == nil { order.append(mid) }
-                // Keep the largest output seen for this id (streamed blocks may update it).
+                // Streamed blocks repeat the usage; keep the most complete one.
                 if let prev = usageByMessage[mid], prev.tokens.output >= t.output { return }
-                usageByMessage[mid] = UsageEvent(timestamp: ts ?? usageByMessage[mid]?.timestamp ?? file.mtime,
+                usageByMessage[mid] = UsageEvent(timestamp: ts ?? usageByMessage[mid]?.timestamp ?? Date(),
                                                  model: model, tokens: t, reportedCost: nil)
             }
         }
 
-        guard let s = start, let e = end, userCount + assistantIDs.count > 0 else { return [] }
-        let id = sessionID.map { file.path.contains("/subagents/") ? "\($0)/\((file.path as NSString).lastPathComponent)" : $0 }
-            ?? (file.path as NSString).lastPathComponent
-        return [SessionSummary(
-            nativeID: id, editor: editor, sourcePath: file.path,
-            title: title ?? Str.clean(firstPrompt ?? "", max: 90), project: cwd,
-            start: s, end: e, userMessages: userCount, assistantMessages: assistantIDs.count,
-            tools: tools, events: order.compactMap { usageByMessage[$0] }, userTimes: userTimes)]
+        func build(file: SourceFile) -> [SessionSummary] {
+            guard let s = start, let e = end, userCount + assistantIDs.count > 0 else { return [] }
+            let events = order.compactMap { usageByMessage[$0] }
+            if let parent = ClaudeCodeSource.parentSessionID(of: file.path) {
+                // Subagent prompts come from the parent agent, not the human: no user turns.
+                var sub = SessionSummary(nativeID: parent, editor: .claudeCode, sourcePath: file.path,
+                                         title: "Subagent run", project: cwd, start: s, end: e,
+                                         userMessages: 0, assistantMessages: assistantIDs.count,
+                                         tools: tools, events: events, userTimes: [])
+                sub.isPartial = true
+                return [sub]
+            }
+            return [SessionSummary(
+                nativeID: sessionID ?? ((file.path as NSString).lastPathComponent as NSString).deletingPathExtension,
+                editor: .claudeCode, sourcePath: file.path,
+                title: title ?? Str.clean(firstPrompt ?? "", max: 90), project: cwd,
+                start: s, end: e, userMessages: userCount, assistantMessages: assistantIDs.count,
+                tools: tools, events: events, userTimes: userTimes)]
+        }
     }
 
     static func toolLabel(_ name: String) -> String {

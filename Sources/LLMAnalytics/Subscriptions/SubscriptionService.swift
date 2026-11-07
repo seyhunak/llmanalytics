@@ -96,8 +96,8 @@ final class SubscriptionService {
 
     // MARK: - Claude Code
 
-    nonisolated static func claudeCredentials() -> [String: Any]? {
-        if let out = Shell.run("/usr/bin/security", ["find-generic-password", "-s", "Claude Code-credentials", "-w"]),
+    nonisolated static func claudeCredentials() async -> [String: Any]? {
+        if let out = await Shell.run("/usr/bin/security", ["find-generic-password", "-s", "Claude Code-credentials", "-w"]),
            let obj = parseJSONObject(out.trimmingCharacters(in: .whitespacesAndNewlines)) { return obj }
         return FS.readJSON(AppPaths.expand(".claude/.credentials.json")) as? [String: Any]
     }
@@ -113,7 +113,7 @@ final class SubscriptionService {
             if let b = acct.str("billingType") { p.notes.append("Billing: \(b.replacingOccurrences(of: "_", with: " "))") }
         }
         guard live else { p.status = .disconnected; return p }
-        guard let creds = claudeCredentials(), let oauth = creds.obj("claudeAiOauth"),
+        guard let creds = await claudeCredentials(), let oauth = creds.obj("claudeAiOauth"),
               let token = oauth.str("accessToken") else {
             p.status = .error("No Claude Code login found in Keychain"); return p
         }
@@ -189,7 +189,7 @@ final class SubscriptionService {
         guard detected else { p.status = .notDetected("No Copilot CLI or VS Code data"); return p }
         guard live else { p.status = .disconnected; return p }
         guard let gh = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"].first(where: FS.exists),
-              let token = Shell.run(gh, ["auth", "token"])?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty else {
+              let token = await Shell.run(gh, ["auth", "token"])?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty else {
             p.status = .error("Needs the GitHub CLI signed in (gh auth login)"); return p
         }
         var req = URLRequest(url: URL(string: "https://api.github.com/copilot_internal/user")!)
@@ -261,18 +261,30 @@ enum JWT {
 }
 
 enum Shell {
-    /// Runs a binary (no shell) and returns stdout, or nil on failure/timeout.
-    static func run(_ exe: String, _ args: [String], timeout: TimeInterval = 5) -> String? {
+    /// Runs a binary (no shell) off the Swift concurrency pool and returns stdout,
+    /// or nil on failure / non-zero exit / timeout.
+    static func run(_ exe: String, _ args: [String], timeout: TimeInterval = 5) async -> String? {
+        await withCheckedContinuation { cont in
+            DispatchQueue.global(qos: .utility).async { cont.resume(returning: runBlocking(exe, args, timeout: timeout)) }
+        }
+    }
+
+    static func runBlocking(_ exe: String, _ args: [String], timeout: TimeInterval) -> String? {
         guard FS.exists(exe) else { return nil }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: exe)
         p.arguments = args
-        let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
+        let out = Pipe(); p.standardOutput = out; p.standardError = FileHandle.nullDevice
+        let done = DispatchSemaphore(value: 0)
+        p.terminationHandler = { _ in done.signal() }
         do { try p.run() } catch { return nil }
-        let deadline = Date().addingTimeInterval(timeout)
-        while p.isRunning && Date() < deadline { usleep(20_000) }
-        if p.isRunning { p.terminate(); return nil }
+        // Drain stdout while the process runs so a large output can't fill the pipe and hang it.
+        var data = Data()
+        let reader = DispatchQueue(label: "shell.read")
+        reader.async { data = out.fileHandleForReading.readDataToEndOfFile() }
+        if done.wait(timeout: .now() + timeout) == .timedOut { p.terminate(); return nil }
+        reader.sync {}
         guard p.terminationStatus == 0 else { return nil }
-        return String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)
+        return String(data: data, encoding: .utf8)
     }
 }

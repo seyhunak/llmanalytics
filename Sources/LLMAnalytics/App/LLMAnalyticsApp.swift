@@ -60,7 +60,7 @@ enum Diagnostics {
         for src in Sources.all {
             let files = src.discover()
             let t0 = Date()
-            let sessions = files.flatMap { src.parse($0) }
+            let sessions = files.flatMap { Sources.parse(src, $0, previous: nil).sessions }
             all += sessions
             let tokens = sessions.reduce(TokenUsage()) { $0 + $1.tokens }
             let cost = sessions.reduce(0) { $0 + $1.cost }
@@ -68,6 +68,8 @@ enum Diagnostics {
                          src.editor.displayName as NSString, files.count, sessions.count,
                          sessions.reduce(0) { $0 + $1.messageCount }, tokens.total, cost, Date().timeIntervalSince(t0)))
         }
+        all = Sources.merge(all)
+        print("After merge:", Editor.allCases.map { e in "\(e.displayName)=\(all.filter { $0.editor == e }.count)" }.joined(separator: ", "))
         let a = Analytics.compute(all: all, filter: Filter(range: .all))
         print("\nTotal sessions \(a.sessions.count), active days \(a.activeDays), streak \(a.currentStreak)/\(a.longestStreak), cost \(Fmt.cost(a.totalCost)), cache hit \(Fmt.percent(a.cacheHitRate))")
         print("Top models:", a.byModel.prefix(6).map { "\($0.model)=\($0.responses) (\(Fmt.cost($0.cost)))" }.joined(separator: ", "))

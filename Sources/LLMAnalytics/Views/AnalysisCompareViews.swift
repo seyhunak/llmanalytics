@@ -43,7 +43,7 @@ struct AnalysisView: View {
                         TableColumn("Input") { (m: ModelStat) in Text(Fmt.tokens(m.tokens.input)).monospacedDigit() }
                         TableColumn("Output") { (m: ModelStat) in Text(Fmt.tokens(m.tokens.output)).monospacedDigit() }
                         TableColumn("Cache read") { (m: ModelStat) in Text(Fmt.tokens(m.tokens.cacheRead)).monospacedDigit() }
-                        TableColumn("Cache write") { (m: ModelStat) in Text(Fmt.tokens(m.tokens.cacheWrite)).monospacedDigit() }
+                        TableColumn("Cache write") { (m: ModelStat) in Text(Fmt.tokens(m.tokens.allCacheWrite)).monospacedDigit() }
                         TableColumn("Cost") { (m: ModelStat) in Text(Fmt.cost(m.cost)).monospacedDigit() }
                     }
                     .frame(minHeight: 220)
@@ -103,7 +103,7 @@ struct AnalysisView: View {
     }
 
     private func kinds(_ t: TokenUsage) -> [(String, Int)] {
-        [("Input", t.input), ("Output", t.output), ("Cache read", t.cacheRead), ("Cache write", t.cacheWrite)]
+        [("Input", t.input), ("Output", t.output), ("Cache read", t.cacheRead), ("Cache write", t.allCacheWrite)]
     }
 
     private func sizeBuckets(_ s: [SessionSummary]) -> [(String, Int)] {
@@ -130,7 +130,7 @@ struct CompareView: View {
                         }
                     }
                     Card("Sessions per day") {
-                        Chart(store.analytics.daily) { p in
+                        Chart(Self.zeroFilled(store.analytics.daily, editors: stats.map(\.editor))) { p in
                             LineMark(x: .value("Day", p.date, unit: .day), y: .value("Sessions", p.sessions))
                                 .foregroundStyle(by: .value("Editor", p.editor.displayName))
                                 .interpolationMethod(.monotone)
@@ -155,6 +155,22 @@ struct CompareView: View {
             }
             .pagePadding()
         }
+    }
+
+    /// One point per editor per day, including days with no sessions, so lines drop to zero
+    /// instead of drawing straight through idle days.
+    static func zeroFilled(_ daily: [DayPoint], editors: [Editor]) -> [DayPoint] {
+        guard let first = daily.map(\.date).min(), let last = daily.map(\.date).max() else { return [] }
+        let cal = Calendar.current
+        var counts: [Date: [Editor: Int]] = [:]
+        for p in daily { counts[p.date, default: [:]][p.editor, default: 0] += p.sessions }
+        var out: [DayPoint] = []
+        var d = first
+        while d <= last {
+            for e in editors { out.append(DayPoint(date: d, editor: e, sessions: counts[d]?[e] ?? 0)) }
+            d = cal.date(byAdding: .day, value: 1, to: d)!
+        }
+        return out
     }
 
     private func best(_ s: [EditorStat]) -> [String: Editor] {

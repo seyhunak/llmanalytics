@@ -26,7 +26,7 @@ enum Snapshots {
         await render(RootView(), size: NSSize(width: 1280, height: 860), to: "\(dir)/transcript.png")
         Navigation.shared.inspectedSessionID = nil
         await render(MenuBarView().background(Color(nsColor: .windowBackgroundColor)), size: NSSize(width: 330, height: 640), to: "\(dir)/menubar.png")
-        await render(SubscriptionsView().background(Color(nsColor: .windowBackgroundColor)), size: NSSize(width: 1040, height: 860), to: "\(dir)/subscriptions.png")
+        await render(SubscriptionsView().background(Color(nsColor: .windowBackgroundColor)), size: NSSize(width: 1040, height: 860), to: "\(dir)/subscriptions-standalone.png")
         print("snapshots written to \(dir)")
         exit(0)
     }

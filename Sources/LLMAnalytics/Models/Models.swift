@@ -50,27 +50,30 @@ enum Editor: String, CaseIterable, Codable, Identifiable, Hashable, Sendable {
     }
 }
 
-struct TokenUsage: Hashable, Sendable {
+struct TokenUsage: Hashable, Codable, Sendable {
     var input: Int = 0        // non-cached input
     var output: Int = 0       // includes reasoning where the vendor bills it that way
     var cacheRead: Int = 0
-    var cacheWrite: Int = 0
+    var cacheWrite: Int = 0   // short-lived (5-minute) cache writes, or the vendor's only kind
     var reasoning: Int = 0    // informational subset of output
+    var cacheWrite1h: Int = 0 // Anthropic 1-hour cache writes (billed at 2x input)
 
-    var total: Int { input + output + cacheRead + cacheWrite }
-    var allInput: Int { input + cacheRead + cacheWrite }
+    /// All cache writes regardless of TTL — what the UI shows as "Cache write".
+    var allCacheWrite: Int { cacheWrite + cacheWrite1h }
+    var total: Int { input + output + cacheRead + allCacheWrite }
+    var allInput: Int { input + cacheRead + allCacheWrite }
     var isZero: Bool { total == 0 }
 
     static func + (a: TokenUsage, b: TokenUsage) -> TokenUsage {
         TokenUsage(input: a.input + b.input, output: a.output + b.output,
                    cacheRead: a.cacheRead + b.cacheRead, cacheWrite: a.cacheWrite + b.cacheWrite,
-                   reasoning: a.reasoning + b.reasoning)
+                   reasoning: a.reasoning + b.reasoning, cacheWrite1h: a.cacheWrite1h + b.cacheWrite1h)
     }
     static func += (a: inout TokenUsage, b: TokenUsage) { a = a + b }
 }
 
 /// One billable model response.
-struct UsageEvent: Hashable, Sendable {
+struct UsageEvent: Hashable, Codable, Sendable {
     let timestamp: Date
     let model: String
     let tokens: TokenUsage
@@ -80,7 +83,7 @@ struct UsageEvent: Hashable, Sendable {
     var cost: Double { reportedCost ?? Pricing.cost(model: model, tokens: tokens) }
 }
 
-struct SessionSummary: Identifiable, Hashable, Sendable {
+struct SessionSummary: Identifiable, Hashable, Codable, Sendable {
     let id: String               // "<editor>:<native id>"
     let nativeID: String
     let editor: Editor
@@ -96,6 +99,8 @@ struct SessionSummary: Identifiable, Hashable, Sendable {
     var userTimes: [Date]
     /// Fallback model when a tool records no per-message usage (e.g. Copilot).
     var fallbackModel: String?
+    /// A fragment (e.g. a Claude Code subagent run) that should be folded into the session with the same id.
+    var isPartial = false
 
     // Derived, filled by `finalize()`
     private(set) var tokens = TokenUsage()
@@ -131,6 +136,25 @@ struct SessionSummary: Identifiable, Hashable, Sendable {
         if title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { title = "Untitled session" }
     }
 
+    /// Combines a session with a fragment of it (subagent runs). The non-partial side wins for
+    /// identity fields; usage, tools and time span are summed.
+    static func merged(_ a: SessionSummary, _ b: SessionSummary) -> SessionSummary {
+        let pickB = a.isPartial && !b.isPartial
+        var base = pickB ? b : a
+        let other = pickB ? a : b
+        base.start = min(base.start, other.start)
+        base.end = max(base.end, other.end)
+        base.userMessages += other.userMessages
+        base.assistantMessages += other.assistantMessages
+        base.userTimes = (base.userTimes + other.userTimes).sorted()
+        base.events = (base.events + other.events).sorted { $0.timestamp < $1.timestamp }
+        for (k, v) in other.tools { base.tools[k, default: 0] += v }
+        if base.project.isEmpty { base.project = other.project }
+        base.isPartial = a.isPartial && b.isPartial
+        base.finalize()
+        return base
+    }
+
     var messageCount: Int { userMessages + assistantMessages }
     var duration: TimeInterval { max(0, end.timeIntervalSince(start)) }
     var primaryModel: String { models.max { $0.value < $1.value }?.key ?? fallbackModel ?? "unknown" }
@@ -157,7 +181,7 @@ struct TranscriptMessage: Identifiable, Sendable {
 }
 
 /// A file (or database) on disk that a source reads; mtime/size drive incremental reloads.
-struct SourceFile: Hashable, Sendable {
+struct SourceFile: Hashable, Codable, Sendable {
     let path: String
     let mtime: Date
     let size: Int64
