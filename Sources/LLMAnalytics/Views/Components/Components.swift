@@ -295,3 +295,29 @@ struct FilterToolbar: ToolbarContent {
         }
     }
 }
+
+/// Dashed horizontal budget line for cost charts; draws nothing when `limit` is 0. Being a mark
+/// (not an overlay) it widens the y-axis so the line stays visible while spend is below it.
+struct BudgetRule: ChartContent {
+    let limit: Double
+    let label: String
+    var body: some ChartContent {
+        if limit > 0 {
+            RuleMark(y: .value("Budget", limit))
+                .foregroundStyle(Color.red.opacity(0.8))
+                .lineStyle(StrokeStyle(lineWidth: 1.2, dash: [5, 4]))
+                .annotation(position: .top, alignment: .trailing) {
+                    Text("\(label) \(Fmt.cost(limit))").font(.caption2.weight(.medium)).foregroundStyle(.red)
+                }
+        }
+    }
+}
+
+extension Editor {
+    /// Editors with data, in a stable order: chart color scales use this so legends stay short.
+    @MainActor static var shown: [Editor] {
+        let found = DataStore.shared.detectedEditors
+        let list = allCases.filter { found.contains($0) }
+        return list.isEmpty ? allCases : list
+    }
+}

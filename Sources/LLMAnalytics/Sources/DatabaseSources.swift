@@ -198,10 +198,12 @@ struct CursorSource: UsageSource {
 
 // MARK: - Gemini CLI
 
-/// ~/.gemini/tmp/<project-hash>/chats/session-*.json
+/// ~/.gemini/tmp/<project-hash>/chats/session-*.json. Qwen Code is a Gemini CLI fork and keeps
+/// the same layout under ~/.qwen/tmp, so it reuses this reader.
 struct GeminiSource: UsageSource {
-    let editor = Editor.gemini
-    var root: String { AppPaths.expand(".gemini/tmp") }
+    var editor = Editor.gemini
+    var root: String = AppPaths.expand(".gemini/tmp")
+    var defaultModel = "gemini-2.5-pro"
     var watchRoots: [String] { FS.exists(root) ? [root] : [] }
     func discover() -> [SourceFile] {
         guard FS.exists(root) else { return [] }
@@ -224,24 +226,24 @@ struct GeminiSource: UsageSource {
             case "user":
                 users += 1; userTimes.append(ts)
                 if firstPrompt == nil { firstPrompt = Self.text(m["content"]) }
-            case "gemini":
+            case "gemini", "qwen", "model", "assistant":
                 assistants += 1
                 for case let t as [String: Any] in m.arr("toolCalls") ?? [] { tools[t.str("name") ?? "tool", default: 0] += 1 }
                 if let tk = m.obj("tokens") {
                     let cached = tk.int("cached")
                     let t = TokenUsage(input: max(0, tk.int("input") - cached), output: tk.int("output") + tk.int("thoughts"),
                                        cacheRead: cached, reasoning: tk.int("thoughts"))
-                    events.append(UsageEvent(timestamp: ts, model: m.str("model") ?? "gemini-2.5-pro", tokens: t, reportedCost: nil))
+                    events.append(UsageEvent(timestamp: ts, model: m.str("model") ?? defaultModel, tokens: t, reportedCost: nil))
                 }
             default: break
             }
         }
         guard users + assistants > 0 else { return [] }
         return [SessionSummary(nativeID: d.str("sessionId") ?? file.path, editor: editor, sourcePath: file.path,
-                               title: Str.clean(firstPrompt ?? "", max: 90), project: d.str("projectHash").map { "gemini:\($0.prefix(8))" } ?? "",
+                               title: Str.clean(firstPrompt ?? "", max: 90), project: d.str("projectHash").map { "\(editor.rawValue):\($0.prefix(8))" } ?? "",
                                start: start ?? file.mtime, end: end ?? file.mtime, userMessages: users,
                                assistantMessages: assistants, tools: tools, events: events, userTimes: userTimes,
-                               fallbackModel: "gemini")]
+                               fallbackModel: editor == .gemini ? "gemini" : defaultModel)]
     }
 
     static func text(_ any: Any?) -> String {
@@ -256,7 +258,7 @@ struct GeminiSource: UsageSource {
             let ts = Dates.parse(m["timestamp"])
             switch m.str("type") {
             case "user": out.append(.init(role: .user, text: Self.text(m["content"]), timestamp: ts))
-            case "gemini":
+            case "gemini", "qwen", "model", "assistant":
                 let t = Self.text(m["content"])
                 if !t.isEmpty { out.append(.init(role: .assistant, text: t, timestamp: ts, model: m.str("model"))) }
                 for case let c as [String: Any] in m.arr("toolCalls") ?? [] {

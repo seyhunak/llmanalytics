@@ -5,6 +5,9 @@ import Charts
 struct MenuBarView: View {
     @State private var store = DataStore.shared
     @State private var subs = SubscriptionService.shared
+    @AppStorage("budget.day") private var dayBudget = 0.0
+    @AppStorage("budget.week") private var weekBudget = 0.0
+    @AppStorage("budget.month") private var monthBudget = 0.0
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -31,6 +34,15 @@ struct MenuBarView: View {
                 Text("Last hour \(Fmt.cost(l.burnRatePerHour))").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Text("This month \(Fmt.cost(l.monthCost))").font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(l.budgets([.day: dayBudget, .week: weekBudget, .month: monthBudget].filter { $0.value > 0 })) { b in
+                let tint: Color = b.fraction >= 1 ? .red : b.fraction >= 0.8 ? .orange : .green
+                HStack(spacing: 8) {
+                    Text(b.period.title).font(.caption).frame(width: 52, alignment: .leading)
+                    ProgressView(value: min(b.fraction, 1)).tint(tint).controlSize(.small)
+                    Text("\(Fmt.cost(b.spent)) / \(Fmt.cost(b.limit))").font(.caption2.monospacedDigit())
+                        .foregroundStyle(b.fraction >= 0.8 ? tint : .secondary).frame(width: 96, alignment: .trailing)
+                }
             }
             Chart(l.last7Days, id: \.date) { d in
                 BarMark(x: .value("Day", d.date, unit: .day), y: .value("Cost", d.cost))

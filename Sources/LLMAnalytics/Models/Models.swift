@@ -10,6 +10,12 @@ enum Editor: String, CaseIterable, Codable, Identifiable, Hashable, Sendable {
     case copilotVSCode
     case gemini
     case opencode
+    case qwen
+    case continueDev
+    case kiro
+    case cline
+    case aider
+    case factory
 
     var id: String { rawValue }
 
@@ -22,6 +28,12 @@ enum Editor: String, CaseIterable, Codable, Identifiable, Hashable, Sendable {
         case .copilotVSCode: "Copilot (VS Code)"
         case .gemini: "Gemini CLI"
         case .opencode: "OpenCode"
+        case .qwen: "Qwen Code"
+        case .continueDev: "Continue"
+        case .kiro: "Kiro"
+        case .cline: "Cline / Roo / Kilo"
+        case .aider: "Aider"
+        case .factory: "Factory Droid"
         }
     }
 
@@ -34,6 +46,12 @@ enum Editor: String, CaseIterable, Codable, Identifiable, Hashable, Sendable {
         case .copilotVSCode: "chevron.left.forwardslash.chevron.right"
         case .gemini: "diamond"
         case .opencode: "curlybraces"
+        case .qwen: "hexagon"
+        case .continueDev: "forward.end"
+        case .kiro: "bolt.horizontal"
+        case .cline: "brain"
+        case .aider: "keyboard"
+        case .factory: "gearshape.2"
         }
     }
 
@@ -46,6 +64,12 @@ enum Editor: String, CaseIterable, Codable, Identifiable, Hashable, Sendable {
         case .copilotVSCode: Color(red: 0.16, green: 0.55, blue: 0.86)
         case .gemini: Color(red: 0.85, green: 0.65, blue: 0.13)
         case .opencode: Color(red: 0.55, green: 0.55, blue: 0.60)
+        case .qwen: Color(red: 0.42, green: 0.30, blue: 0.90)
+        case .continueDev: Color(red: 0.10, green: 0.70, blue: 0.80)
+        case .kiro: Color(red: 0.62, green: 0.25, blue: 0.95)
+        case .cline: Color(red: 0.90, green: 0.30, blue: 0.50)
+        case .aider: Color(red: 0.30, green: 0.70, blue: 0.25)
+        case .factory: Color(red: 0.95, green: 0.50, blue: 0.10)
         }
     }
 }

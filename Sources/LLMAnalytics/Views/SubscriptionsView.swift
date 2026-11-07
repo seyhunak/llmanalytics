@@ -126,6 +126,10 @@ struct ManualPlanEditor: View {
             TextField("Name", text: $plan.name, prompt: Text("e.g. Devin Team"))
             TextField("Monthly price (USD)", value: $plan.monthlyPrice, format: .number)
             Stepper("Renews on day \(plan.renewalDay)", value: $plan.renewalDay, in: 1...28)
+            Picker("Covers", selection: $plan.editor) {
+                Text("No editor").tag(Editor?.none)
+                ForEach(Editor.allCases) { Text($0.displayName).tag(Editor?.some($0)) }
+            }
             Section("Optional quota") {
                 TextField("Quota label", text: $plan.quotaLabel, prompt: Text("e.g. ACUs"))
                 TextField("Used", value: $plan.quotaUsed, format: .number)

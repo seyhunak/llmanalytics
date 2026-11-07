@@ -4,6 +4,10 @@ import Charts
 struct CostsView: View {
     @State private var store = DataStore.shared
     @State private var subs = SubscriptionService.shared
+    // Read so the page redraws when budgets change in Settings.
+    @AppStorage("budget.day") private var dayBudget = 0.0
+    @AppStorage("budget.week") private var weekBudget = 0.0
+    @AppStorage("budget.month") private var monthBudget = 0.0
 
     var body: some View {
         let a = store.analytics
@@ -19,24 +23,40 @@ struct CostsView: View {
                 Text("Costs are estimated from token counts at public API list prices. Subscription plans (Claude Max, ChatGPT, Copilot) are flat-rate, so this shows what the same usage would cost on the API. OpenCode costs are taken from OpenCode's own records.")
                     .font(.caption).foregroundStyle(.secondary)
 
+                let budgets = store.live.budgets([.day: dayBudget, .week: weekBudget, .month: monthBudget].filter { $0.value > 0 })
+                if !budgets.isEmpty {
+                    Card("Budgets", subtitle: "All editors, at API list prices",
+                         trailing: AnyView(SettingsLink { Text("Edit") }.buttonStyle(.link))) {
+                        HStack(alignment: .top, spacing: 24) {
+                            ForEach(budgets) { QuotaBar(window: $0.window) }
+                        }
+                    }
+                }
+                PlanValueCard()
                 Card("Spend by month") {
                     if a.byMonth.isEmpty { EmptyState(title: "No spend", message: "No token usage in this range.", symbol: "chart.bar") }
                     else {
-                        Chart(a.byMonth) { m in
-                            BarMark(x: .value("Month", m.month, unit: .month), y: .value("Cost", m.cost))
-                                .foregroundStyle(by: .value("Editor", m.editor.displayName))
+                        Chart {
+                            ForEach(a.byMonth) { m in
+                                BarMark(x: .value("Month", m.month, unit: .month), y: .value("Cost", m.cost))
+                                    .foregroundStyle(by: .value("Editor", m.editor.displayName))
+                            }
+                            BudgetRule(limit: monthBudget, label: "Monthly budget")
                         }
-                        .chartForegroundStyleScale(domain: Editor.allCases.map(\.displayName), range: Editor.allCases.map(\.color))
+                        .chartForegroundStyleScale(domain: Editor.shown.map(\.displayName), range: Editor.shown.map(\.color))
                         .chartYAxis { AxisMarks { v in AxisGridLine(); AxisValueLabel { if let d = v.as(Double.self) { Text(Fmt.cost(d)) } } } }
                         .frame(height: 200)
                     }
                 }
                 Card("Daily spend") {
-                    Chart(a.daily) { p in
-                        AreaMark(x: .value("Day", p.date, unit: .day), y: .value("Cost", p.cost))
-                            .foregroundStyle(by: .value("Editor", p.editor.displayName))
+                    Chart {
+                        ForEach(a.daily) { p in
+                            AreaMark(x: .value("Day", p.date, unit: .day), y: .value("Cost", p.cost))
+                                .foregroundStyle(by: .value("Editor", p.editor.displayName))
+                        }
+                        BudgetRule(limit: dayBudget, label: "Daily budget")
                     }
-                    .chartForegroundStyleScale(domain: Editor.allCases.map(\.displayName), range: Editor.allCases.map(\.color))
+                    .chartForegroundStyleScale(domain: Editor.shown.map(\.displayName), range: Editor.shown.map(\.color))
                     .chartYAxis { AxisMarks { v in AxisGridLine(); AxisValueLabel { if let d = v.as(Double.self) { Text(Fmt.cost(d)) } } } }
                     .frame(height: 160)
                 }
@@ -50,6 +70,8 @@ struct CostsView: View {
                         BarList(rows: a.byEditor.map { .init(label: $0.editor.displayName, value: $0.cost, display: Fmt.cost($0.cost), color: $0.editor.color, badge: $0.editor) })
                     }
                 }
+                WhatIfCard(sessions: a.sessions)
+                OverpoweredCard(sessions: a.sessions)
                 HStack(alignment: .top, spacing: 16) {
                     Card("By project") {
                         BarList(rows: a.byProject.sorted { $0.cost > $1.cost }.map { .init(label: $0.name, value: $0.cost, display: Fmt.cost($0.cost), color: .indigo) }, limit: 10)

@@ -58,6 +58,9 @@ enum Pricing {
         ("gemini-2.5-flash", .init(input: 0.3, output: 2.5, cacheRead: 0.075, cacheWrite: 0)),
         ("gemini-3", .init(input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0)),
         ("gemini", .init(input: 1.25, output: 10, cacheRead: 0.31, cacheWrite: 0)),
+        ("qwen3-coder-plus", .init(input: 1, output: 5, cacheRead: 0.1, cacheWrite: 0)),
+        ("qwen3-coder-flash", .init(input: 0.3, output: 1.5, cacheRead: 0.03, cacheWrite: 0)),
+        ("qwen", .init(input: 1, output: 5, cacheRead: 0.1, cacheWrite: 0)),
     ]
 
     nonisolated(unsafe) private static var overrides: [String: ModelPrice] = loadOverrides()

@@ -158,7 +158,10 @@ final class DataStore {
         let all = sessions
         Task.detached(priority: .utility) {
             let l = LiveSnapshot.compute(all: all)
-            await MainActor.run { [weak self] in self?.live = l }
+            await MainActor.run { [weak self] in
+                self?.live = l
+                AlertCenter.shared.evaluate(live: l)
+            }
         }
     }
 
@@ -173,6 +176,7 @@ final class DataStore {
                 guard let self, gen == self.computeGeneration else { return }
                 self.analytics = a
                 self.live = l
+                AlertCenter.shared.evaluate(live: l)
             }
         }
     }

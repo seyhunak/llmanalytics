@@ -137,7 +137,7 @@ struct CompareView: View {
                             PointMark(x: .value("Day", p.date, unit: .day), y: .value("Sessions", p.sessions))
                                 .foregroundStyle(by: .value("Editor", p.editor.displayName)).symbolSize(14)
                         }
-                        .chartForegroundStyleScale(domain: Editor.allCases.map(\.displayName), range: Editor.allCases.map(\.color))
+                        .chartForegroundStyleScale(domain: Editor.shown.map(\.displayName), range: Editor.shown.map(\.color))
                         .frame(height: 200)
                     }
                     Card("Efficiency", subtitle: "Output tokens per 1K input · cache hit rate · tokens per message") {

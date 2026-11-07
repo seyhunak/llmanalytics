@@ -5,6 +5,7 @@ struct DashboardView: View {
     @State private var store = DataStore.shared
     @State private var nav = Navigation.shared
     @State private var metric: DailyMetric = .tokens
+    @AppStorage("budget.day") private var dayBudget = 0.0
 
     enum DailyMetric: String, CaseIterable { case tokens = "Tokens", cost = "Cost", messages = "Prompts" }
 
@@ -81,12 +82,15 @@ struct DashboardView: View {
     @ViewBuilder private func dailyChart(_ a: Analytics) -> some View {
         if a.daily.isEmpty { EmptyState(title: "No activity", message: "Nothing in this range.", symbol: "chart.bar") }
         else {
-            Chart(a.daily) { p in
-                BarMark(x: .value("Day", p.date, unit: .day),
-                        y: .value(metric.rawValue, metric == .tokens ? Double(p.tokens) : metric == .cost ? p.cost : Double(p.messages)))
-                    .foregroundStyle(by: .value("Editor", p.editor.displayName))
+            Chart {
+                ForEach(a.daily) { p in
+                    BarMark(x: .value("Day", p.date, unit: .day),
+                            y: .value(metric.rawValue, metric == .tokens ? Double(p.tokens) : metric == .cost ? p.cost : Double(p.messages)))
+                        .foregroundStyle(by: .value("Editor", p.editor.displayName))
+                }
+                BudgetRule(limit: metric == .cost ? dayBudget : 0, label: "Daily budget")
             }
-            .chartForegroundStyleScale(domain: Editor.allCases.map(\.displayName), range: Editor.allCases.map(\.color))
+            .chartForegroundStyleScale(domain: Editor.shown.map(\.displayName), range: Editor.shown.map(\.color))
             .chartYAxis { AxisMarks { v in
                 AxisGridLine(); AxisValueLabel {
                     if let d = v.as(Double.self) { Text(metric == .cost ? Fmt.cost(d) : Fmt.compact(d)) }

@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 import AppKit
 
 @main
@@ -31,7 +32,7 @@ struct LLMAnalyticsApp: App {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         if let dir = Snapshots.outputDir {
             Task { @MainActor in await Snapshots.run(to: dir) }
@@ -39,9 +40,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         Self.applyDockPolicy(UserDefaults.standard.object(forKey: "showDockIcon") as? Bool ?? true)
         Task { @MainActor in
+            if Bundle.main.bundleURL.pathExtension == "app" { UNUserNotificationCenter.current().delegate = self }
+            if AlertSettings.current.enabled { AlertCenter.shared.requestPermission() }
             DataStore.shared.start()
             SubscriptionService.shared.start()
         }
+    }
+
+    /// Show alerts as banners even while the app is frontmost.
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
+        [.banner, .sound]
     }
 
     /// Closing the window keeps the app alive in the menu bar.

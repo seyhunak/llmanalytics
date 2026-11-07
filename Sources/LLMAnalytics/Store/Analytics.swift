@@ -252,6 +252,7 @@ struct LiveSnapshot: Sendable {
     var activeSessions: [SessionSummary] = []
     var last7Days: [(date: Date, cost: Double, tokens: Int)] = []
     var monthCost = 0.0
+    var weekCost = 0.0          // since the start of the calendar week
     var burnRatePerHour = 0.0   // cost in the last 60 minutes
 
     static func compute(all: [SessionSummary], now: Date = Date()) -> LiveSnapshot {
@@ -260,15 +261,18 @@ struct LiveSnapshot: Sendable {
         let weekStart = cal.date(byAdding: .day, value: -6, to: today)!
         let monthStart = cal.date(from: cal.dateComponents([.year, .month], from: now))!
         let hourAgo = now.addingTimeInterval(-3600)
+        let calWeekStart = cal.dateInterval(of: .weekOfYear, for: now)?.start ?? weekStart
         var snap = LiveSnapshot()
         var perDay: [Date: (Double, Int)] = [:]
         var perEditor: [Editor: (Double, Int)] = [:]
-        for s in all where s.end >= min(weekStart, monthStart) {
+        let from = min(weekStart, monthStart, calWeekStart)
+        for s in all where s.end >= from {
             if s.end >= today { snap.todaySessions += 1 }
             snap.todayMessages += s.userTimes.filter { $0 >= today }.count
-            for e in s.events where e.timestamp >= min(weekStart, monthStart) {
+            for e in s.events where e.timestamp >= from {
                 let c = e.cost
                 if e.timestamp >= monthStart { snap.monthCost += c }
+                if e.timestamp >= calWeekStart { snap.weekCost += c }
                 if e.timestamp >= hourAgo { snap.burnRatePerHour += c }
                 guard e.timestamp >= weekStart else { continue }
                 let d = cal.startOfDay(for: e.timestamp)

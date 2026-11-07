@@ -30,6 +30,8 @@ enum Sources {
     static let all: [UsageSource] = [
         ClaudeCodeSource(), CodexSource(), CursorSource(), CopilotCLISource(),
         CopilotVSCodeSource(), GeminiSource(), OpenCodeSource(),
+        GeminiSource(editor: .qwen, root: AppPaths.expand(".qwen/tmp"), defaultModel: "qwen3-coder-plus"),
+        ContinueSource(), KiroSource(), ClineSource(), AiderSource(), FactorySource(),
     ]
     static func source(for editor: Editor) -> UsageSource? { all.first { $0.editor == editor } }
 

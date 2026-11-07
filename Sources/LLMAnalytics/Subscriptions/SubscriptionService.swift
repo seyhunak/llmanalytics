@@ -38,6 +38,8 @@ struct ManualPlan: Codable, Identifiable, Hashable, Sendable {
     var quotaLabel: String = ""
     var quotaUsed: Double = 0
     var quotaTotal: Double = 0
+    /// The editor this plan pays for, so its value can be compared with API-equivalent usage.
+    var editor: Editor? = nil
 }
 
 @MainActor
@@ -92,6 +94,7 @@ final class SubscriptionService {
         async let cursor = Self.cursor(live: live.contains("Cursor"))
         providers = await [claude, codex, copilot, cursor]
         isRefreshing = false
+        AlertCenter.shared.evaluate(providers: providers, manual: manualPlans)
     }
 
     // MARK: - Claude Code
